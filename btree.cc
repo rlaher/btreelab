@@ -1,9 +1,5 @@
 #include <assert.h>
 #include "btree.h"
-#include <math.h>
-#include <string.h>
-
-// jackson was here
 
 KeyValuePair::KeyValuePair()
 {}
@@ -37,6 +33,10 @@ BTreeIndex::BTreeIndex(SIZE_T keysize,
   superblock.info.valuesize=valuesize;
   buffercache=cache;
   // note: ignoring unique now
+
+  //Calculate max number of keys per block
+  SIZE_T blockSize = buffercache->GetBlockSize();
+  maxNumKeys = (blockSize - sizeof(NodeMetadata))/(16);
 }
 
 BTreeIndex::BTreeIndex()
@@ -195,7 +195,7 @@ ERROR_T BTreeIndex::LookupOrUpdateInternal(const SIZE_T &node,
 					   VALUE_T &value)
 {
   BTreeNode b;
-  ERROR_T rc;
+  ERROR_T rc; // error checker
   SIZE_T offset;
   KEY_T testkey;
   SIZE_T ptr;
@@ -239,22 +239,20 @@ ERROR_T BTreeIndex::LookupOrUpdateInternal(const SIZE_T &node,
       rc=b.GetKey(offset,testkey);
       if (rc) {  return rc; }
       if (testkey==key) {
-	if (op==BTREE_OP_LOOKUP) {
-	  return b.GetVal(offset,value);
-	} else {
+      	if (op==BTREE_OP_LOOKUP) {
+      	  return b.GetVal(offset,value);
+	  } else {
 	  // BTREE_OP_UPDATE
-	  // WRITE ME
-    rc = b.SetVal(offset,value);
-    if (rc) { return rc; }
+      rc=b.SetVal(offset,value);
+      if (rc) {  return rc; }
 
-    rc = b.Serialize(buffercache, node);
-    if (rc) { return rc; }
+      rc=b.Serialize(buffercache,node);
+      if (rc) {  return rc; }
 
-    return ERROR_NOERROR;
+	    return ERROR_NOERROR;
 	}
       }
     }
-    return ERROR_NONEXISTENT;
     break;
   default:
     // We can't be looking at anything other than a root, internal, or leaf
@@ -365,661 +363,433 @@ ERROR_T BTreeIndex::Lookup(const KEY_T &key, VALUE_T &value)
 
 ERROR_T BTreeIndex::Insert(const KEY_T &key, const VALUE_T &value)
 {
-  list<SIZE_T> clues;
-  KEY_T instkey = key;//since during split and pop, the key been poped may change
+  // ROHAN TAKE 1
 
-  bool pop = true;
-  BTreeNode b;
+  // Creating B+ tree without linking leaf nodes.
+  // Will link leaf nodes for extra credit
+
   ERROR_T rc;
-  SIZE_T ptr;
+  VALUE_T val = value;
 
-  // First look up which leaf should insert to, and record clues
-  rc = LookupInsertion(clues, superblock.info.rootnode, instkey);
-  if(rc != ERROR_NOERROR) {return rc;}
-
-  while (!clues.empty() && pop == true){
-    rc = b.Unserialize(buffercache, clues.front());
-    if (rc!=ERROR_NOERROR) { return rc; }
-
-    rc = InsertNode(b, instkey, value, ptr, pop); //only call InsertNode once
-    if (rc != ERROR_NOERROR) { return rc; }
-
-    rc = b.Serialize(buffercache, clues.front());
-    if (rc != ERROR_NOERROR) { return rc; }
-
-    clues.pop_front(); // remove this node
+  // Lookup to see if value exists.
+  // If it does, rc will return NOERROR -> return ERROR_CONFLICT due to duplicate key
+  // If lookup returns NONEXISTENT, then we can insert value into tree
+  rc = LookupOrUpdateInternal(superblock.info.rootnode, BTREE_OP_LOOKUP, key, val);
+  if (rc==ERROR_NOERROR) {
+    return ERROR_CONFLICT;
   }
-  return ERROR_NOERROR;
-}
-
-ERROR_T BTreeIndex::LookupInsertion(list<SIZE_T> &clues, const SIZE_T &blocknum, const KEY_T &key)
-{
-  BTreeNode node;
-  ERROR_T rc;
-  KEY_T tempkey;
-  SIZE_T offset;
-  SIZE_T tempptr;
-
-  clues.push_front(blocknum);
-
-  rc = node.Unserialize(buffercache, blocknum);
-
-  if (rc != ERROR_NOERROR) {
+  else if (rc!=ERROR_NONEXISTENT) {
     return rc;
   }
 
-  switch(node.info.nodetype) {
-    case BTREE_ROOT_NODE:
-    case BTREE_INTERIOR_NODE: {
-      for (offset = 0; offset < node.info.numkeys; offset++) {
-        rc = node.GetKey(offset, tempkey);
-        if (rc) { return rc; }
+  BTreeNode leafNode;
+  BTreeNode rootNode;
+  BTreeNode rightLeafNode;
+  SIZE_T leafPtr;
+  SIZE_T rightLeafPtr;
+  rootNode.Unserialize(buffercache,superblock.info.rootnode); // Set root.
 
-        if (key < tempkey) {
-          rc = node.GetPtr(offset, tempptr);
+  // If no keys exist in tree yet
+  if(rootNode.info.numkeys == 0) {
+    AllocateNode(leafPtr); // Allocate a new block
+    leafNode = BTreeNode(BTREE_LEAF_NODE,superblock.info.keysize,superblock.info.valuesize,superblock.info.blocksize);
+    leafNode.Serialize(buffercache,leafPtr);
+    rc = leafNode.Unserialize(buffercache,leafPtr);
+    if (rc) { return rc; }
+
+    // Insert value into node
+    leafNode.SetKey(0, key); // Assign key to offset 0 within LeafNode
+    leafNode.SetVal(0, value); // Assign value to offset 0 within leafNode
+    leafNode.info.numkeys++;
+    leafNode.Serialize(buffercache,leafPtr); // Serialize again and write updated valuesize
+
+    // Link leafNode to root of tree
+    rc = rootNode.Unserialize(buffercache, superblock.info.rootnode);
+    if (rc) { return rc; }
+    rootNode.SetKey(0,key);
+    rootNode.SetPtr(0,leafPtr);
+    rootNode.info.numkeys++;
+
+    // Create a node to the right of new leafNode
+    AllocateNode(rightLeafPtr);
+    rightLeafNode = BTreeNode(BTREE_LEAF_NODE,superblock.info.keysize,superblock.info.valuesize,superblock.info.blocksize);
+    rc = rightLeafNode.Serialize(buffercache,rightLeafPtr);
+    if (rc) { return rc; }
+
+    // Connect rightLeafNode to root
+    rootNode.SetPtr(1,rightLeafPtr);
+    rc = rootNode.Serialize(buffercache,superblock.info.rootnode);
+    if (rc) { return rc; }
+  }
+
+  // If tree already exists
+  else {
+    // Get leafNode from last pointer where we want to insert key
+    std::vector<SIZE_T> ptrTrail; // Follow pointers to spot for insertion
+    ptrTrail.push_back(superblock.info.rootnode); // Dynamically resize and add root to end
+    CreatePtrTrail(superblock.info.rootnode,key,ptrTrail);
+    leafPtr = ptrTrail.back();
+    ptrTrail.pop_back();
+
+    rc = leafNode.Unserialize(buffercache, leafPtr);
+    if(rc) { return rc; }
+
+    // Walk across the leafNode & increment key count
+    leafNode.info.numkeys++;
+
+    // If that was the only key in the leafNode
+    if (leafNode.info.numkeys == 1) {
+      rc = leafNode.SetKey(0,key);
+      if(rc) { return rc; }
+      rc = leafNode.SetVal(0,value);
+      if(rc) { return rc; }
+    }
+    // If there were other keys in the leafNode
+    else {
+      KEY_T testkey;
+      KEY_T keyInsPos;
+      VALUE_T valueInsPos;
+      bool inserted = false;
+      // Loop through leafNode to find spot to insert
+      for (SIZE_T offset=0; offset<leafNode.info.numkeys-1; offset++) {
+        rc=leafNode.GetKey(offset,testkey);
+        if(rc) { return rc; }
+        if(key<testkey) {
+          // Shift over all following keys by 1 space
+          for (unsigned int offset2=leafNode.info.numkeys-2; offset2>=offset; offset2--){
+              rc = leafNode.GetKey((SIZE_T)offset2, keyInsPos);
+              if (rc) { return rc; }
+              rc = leafNode.GetVal((SIZE_T)offset2, valueInsPos);
+              if (rc) { return rc; }
+              rc = leafNode.SetKey((SIZE_T)offset2+1, keyInsPos);
+              if (rc) { return rc; }
+              rc = leafNode.SetVal((SIZE_T)offset2+1, valueInsPos);
+              if (rc) { return rc; }
+          }
+
+          // Insert new key in spot found above
+          rc = leafNode.SetKey(offset,key);
           if (rc) { return rc; }
-
-          return LookupInsertion(clues, tempptr, key);
+          rc = leafNode.SetVal(offset,value);
+          if (rc) { return rc; }
+          inserted = true;
+          rc = leafNode.SetKey(offset,key);
+          if (rc) { return rc; }
+          rc = leafNode.SetVal(offset, value);
+          if (rc) { return rc;}
+          break; // Remove?
         }
       }
-
-      //the scan goes to the last key in the node (return the point of the right)
-      if (node.info.numkeys > 0) {
-        rc = node.GetPtr(node.info.numkeys, tempptr);
+      if (!inserted) {
+        rc=leafNode.SetKey(leafNode.info.numkeys-1,key);
         if (rc) { return rc; }
-
-        return LookupInsertion(clues, tempptr, key);
-
-      } else {
-        // the node is empty
-        return ERROR_NOERROR;
+        rc=leafNode.SetVal(leafNode.info.numkeys-1,value);
+        if (rc) { return rc; }
       }
-
-      break;
     }
 
-    case BTREE_LEAF_NODE:
-      // direct return the node pointer
-      return ERROR_NOERROR;
-  }
+    leafNode.Serialize(buffercache, leafPtr); // Write back to disk
+    // Check if the node length is over 2/3, and call rebalance if necessary
+      if((int)leafNode.info.numkeys > (int)(2*maxNumKeys/3)) {
+          SIZE_T parentPtr = ptrTrail.back();
+          ptrTrail.pop_back();
+          rc = Rebalance(parentPtr, ptrTrail);
+          if (rc) { return rc; }
+      }
+    }
+
   return ERROR_NOERROR;
 }
 
-ERROR_T BTreeIndex::InsertNode(BTreeNode &node, KEY_T &key,
-                               const VALUE_T &value, SIZE_T &ptr, bool &pop)
-{
+//This lookup function will find the path to the node where the passed in key would go, and return it as a stack of pointers.
+ERROR_T BTreeIndex::CreatePtrTrail(const SIZE_T &node, const KEY_T &key, std::vector<SIZE_T> &pointerPath){
+  BTreeNode b;
   ERROR_T rc;
-
-  SIZE_T MaxKeysNumber;
-  switch (node.info.nodetype) {
-    case BTREE_ROOT_NODE:
-    case BTREE_INTERIOR_NODE:
-      MaxKeysNumber = node.info.GetNumSlotsAsInterior();
-      break;
-    case BTREE_LEAF_NODE:
-      MaxKeysNumber = node.info.GetNumSlotsAsLeaf();
-  }
-
-  if (node.info.numkeys == 0) {
-    switch(node.info.nodetype) {
-      case BTREE_ROOT_NODE: {
-        // ----------------------------------
-        // Initial condition: empty root node
-        // ----------------------------------
-        // Make one new leaf node to store the key and value
-        BTreeNode newleaf(BTREE_LEAF_NODE,
-                          superblock.info.keysize,
-                          superblock.info.valuesize,
-                          buffercache -> GetBlockSize());
-        newleaf.info.rootnode = superblock_index + 1;
-        newleaf.info.numkeys = 1;
-
-        rc = newleaf.SetKey(0, key);
-        if (rc) { return rc; }
-        rc = newleaf.SetVal(0, value);
-        if (rc) { return rc; }
-
-        // Write the leaf to block
-        SIZE_T newleafptr;
-        rc = AllocateNode(newleafptr);
-        if (rc) { return rc; }
-
-        rc = newleaf.Serialize(buffercache, newleafptr);
-        if (rc) { return rc; }
-
-        // ----------------------------------
-        // Set up the root node
-        // ----------------------------------
-        //
-        // Set number of keys in root to 1
-        node.info.numkeys = 1;
-
-        // Set key in root
-        rc = node.SetKey(0, key);
-        if (rc) { return rc; }
-
-        // Set both ptr of root to point at
-        // the only leaf node
-        rc = node.SetPtr(0, newleafptr);
-        if (rc) { return rc; }
-        rc = node.SetPtr(1, newleafptr);
-        if (rc) { return rc; }
-
-        rc = node.Serialize(buffercache, superblock_index + 1);
-        if (rc) { return rc; }
-
-        // No need to pop, insertion is done
-        pop = false;
-
-        break;
-
-      }
-      // No interior is allowed to be empty
-      case BTREE_INTERIOR_NODE:
-        return ERROR_INSANE;
-
-      case BTREE_LEAF_NODE: {
-        rc = node.SetKey(0, key);
-        if (rc) { return rc; }
-        rc = node.SetVal(0, value);
-        if (rc) { return rc; }
-
-        break;
-      }
-      default:
-        return ERROR_INSANE;
-    }
-  } else if (node.info.numkeys > 0 &&
-             node.info.numkeys < MaxKeysNumber) {
-
-    rc = InsertNonFull(node, key, value, ptr);
-    if (rc) { return rc; }
-
-    pop = false;
-
-    return ERROR_NOERROR;
-
-  } else if (node.info.numkeys == MaxKeysNumber) {
-    // When the node is full, need to split and pop
-    rc = InsertFull(node, key, value, ptr, pop);
-    if (rc) { return rc; }
-
-    return ERROR_NOERROR;
-  }
-  return ERROR_NOERROR;
-}
-
-ERROR_T BTreeIndex::InsertFull (BTreeNode &oldnode, KEY_T &key,
-                                const VALUE_T &value, SIZE_T &ptr, bool &pop)
-{
-  // Determine the insert position
-  ERROR_T rc;
-  SIZE_T inspos;
   SIZE_T offset;
-  KEY_T tempkey;
-  SIZE_T tempptr;
-  VALUE_T tempval;
+  KEY_T testkey;
+  SIZE_T ptr;
 
-  for (offset = 0; offset < oldnode.info.numkeys; offset++) {
-    rc = oldnode.GetKey(offset, tempkey);
-    if (rc) { return rc; }
+  rc = b.Unserialize(buffercache, node);
 
-    if (key == tempkey) {
-      return ERROR_CONFLICT;
-    } else if (key < tempkey) {
-      break;
-    }
+  if(rc!=ERROR_NOERROR){
+    return rc;
   }
-  inspos = offset;
 
-  // Determine the partition position
-  //   origmed: median position before insertion
-  //   median: median position after insertion
-  SIZE_T nslots;
-  switch (oldnode.info.nodetype) {
+  switch(b.info.nodetype){
     case BTREE_ROOT_NODE:
     case BTREE_INTERIOR_NODE:
-      nslots = oldnode.info.GetNumSlotsAsInterior();
-      break;
+      // Scan through key/ptr pairs
+      //and recurse if possible
+    for(offset=0;offset<b.info.numkeys; offset++){
+      rc=b.GetKey(offset,testkey);
+      if(rc) { return rc; }
+      if(key < testkey){
+            // OK, so we now have the first key that's larger
+            // so we ned to recurse on the ptr immediately previous to
+            // this one, if it exists
+        rc=b.GetPtr(offset,ptr);
+        if (rc) { return rc; }
+          //If there is no error on finding the appropriate pointer, push it onto our stack.
+        pointerPath.push_back(ptr);
+        //cout << "PointerPath has: " << pointerPath[0] << endl;
+        return CreatePtrTrail(ptr, key, pointerPath);
+      }
+    }
+
+      //if we get here, we need to go to the next pointer, if it exists.
+    if(b.info.numkeys>0){
+      rc=b.GetPtr(b.info.numkeys,ptr);
+      if (rc) { return rc; }
+        //If there is no error on finding the appropriate pointer, push it onto our stack.
+      pointerPath.push_back(ptr);
+      return CreatePtrTrail(ptr, key, pointerPath);
+    } else {
+        // There are no keys at all on this node, so nowhere to go
+      return ERROR_NONEXISTENT;
+    }
+    break;
     case BTREE_LEAF_NODE:
-      nslots = oldnode.info.GetNumSlotsAsLeaf();
-  }
-
-  SIZE_T origmed = ceil(nslots / 2.0) - 1;
-  SIZE_T median;
-  SIZE_T i;
-
-  if (inspos <= origmed) {
-    median = origmed;
-  } else {
-    median = origmed + 1;
-  }
-
-  switch(oldnode.info.nodetype) {
-    // ----------------------------------
-    // BTREE_ROOT_NODE
-    // ----------------------------------
-    // Two nodes are needed when root need to be splitted.
-    // The keys & ptrs are distributed to the left new node
-    // and the right node. Then the root node is replaced
-    // with just one popped key and two pointers referring to
-    // the two new nodes.
-    case BTREE_ROOT_NODE: {
-      // Create two new nodes
-      BTreeNode newleftnode(BTREE_INTERIOR_NODE,
-                            superblock.info.keysize,
-                            superblock.info.valuesize,
-                            buffercache -> GetBlockSize());
-      newleftnode.info.rootnode = superblock_index + 1;
-      newleftnode.info.numkeys = 0;
-
-      BTreeNode newrightnode(BTREE_INTERIOR_NODE,
-                             superblock.info.keysize,
-                             superblock.info.valuesize,
-                             buffercache -> GetBlockSize());
-      newrightnode.info.rootnode = superblock_index + 1;
-      newrightnode.info.numkeys = 0;
-
-      // Move the first half of root node into left new node
-      for (i = 0; i < median; i++) {
-        newleftnode.info.numkeys++;
-
-        rc = oldnode.GetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = oldnode.GetPtr(i, tempptr);
-        if (rc) { return rc; }
-
-        rc = newleftnode.SetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = newleftnode.SetPtr(i, tempptr);
-        if (rc) { return rc; }
-      }
-      rc = oldnode.GetPtr(median, tempptr);
-      if (rc) { return rc; }
-      rc = newleftnode.SetPtr(median, tempptr);
-      if (rc) { return rc; }
-
-      // Move the other half of root node into right new node
-      for (i = median; i < nslots; i++) {
-        newrightnode.info.numkeys++;
-
-        rc = oldnode.GetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = oldnode.GetPtr(i, tempptr);
-        if (rc) { return rc; }
-
-        rc = newrightnode.SetKey(i - median, tempkey);
-        if (rc) { return rc; }
-        rc = newrightnode.SetPtr(i - median, tempptr);
-        if (rc) { return rc; }
-      }
-      rc = oldnode.GetPtr(nslots, tempptr);
-      if (rc) { return rc; }
-      rc = newrightnode.SetPtr(nslots - median, tempptr);
-      if (rc) { return rc; }
-
-      // Insert the new key and ptr to either node
-      if (inspos <= origmed) {
-        rc = InsertNonFull(newleftnode, key, value, ptr);
-        if (rc) { return rc; }
-      } else {
-        rc = InsertNonFull(newrightnode, key, value, ptr);
-        if (rc) { return rc; }
-      }
-
-      // Two new blocks needed for the nodes
-      SIZE_T leftptr;
-      SIZE_T rightptr;
-
-      rc = AllocateNode(leftptr);
-      if (rc) { return rc; }
-      rc = AllocateNode(rightptr);
-      if (rc) { return rc; }
-
-      // Get the median key to promote
-      rc = newrightnode.GetKey(0, key);
-      if (rc) { return rc; }
-
-      // Promote the median key and delete from the right node
-      for (i = 1; i < newrightnode.info.numkeys; i++) {
-        rc = newrightnode.GetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = newrightnode.GetPtr(i, tempptr);
-        if (rc) { return rc; }
-
-        rc = newrightnode.SetKey(i - 1, tempkey);
-        if (rc) { return rc; }
-        rc = newrightnode.SetPtr(i - 1, tempptr);
-        if (rc) { return rc; }
-      }
-      rc = newrightnode.GetPtr(newrightnode.info.numkeys, tempptr);
-      if (rc) { return rc; }
-      rc = newrightnode.SetPtr(newrightnode.info.numkeys - 1, tempptr);
-      if (rc) { return rc; }
-
-      newrightnode.info.numkeys--;
-
-      // Write the changes to the block
-      rc = newleftnode.Serialize(buffercache, leftptr);
-      if (rc) { return rc; }
-      rc = newrightnode.Serialize(buffercache, rightptr);
-      if (rc) { return rc; }
-
-      // Rewrite the root node with the promoted key
-      rc = oldnode.SetKey(0, key);
-      if (rc) { return rc; }
-      rc = oldnode.SetPtr(0, leftptr);
-      if (rc) { return rc; }
-      rc = oldnode.SetPtr(1, rightptr);
-      if (rc) { return rc; }
-      oldnode.info.numkeys = 1;
-
-      rc = oldnode.Serialize(buffercache, superblock_index + 1);
-      if (rc) { return rc; }
-
-      pop = false;
-
-      break;
-    }
-
-    // ----------------------------------
-    // BTREE_INTERIOR_NODE
-    // ----------------------------------
-    //
-    case BTREE_INTERIOR_NODE: {
-      BTreeNode newnode(BTREE_INTERIOR_NODE,
-                        superblock.info.keysize,
-                        superblock.info.valuesize,
-                        buffercache -> GetBlockSize());
-      newnode.info.rootnode = superblock_index + 1;
-      newnode.info.numkeys = 0;
-
-      for (i = median; i < nslots; i++) {
-        newnode.info.numkeys++;
-
-        rc = oldnode.GetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = oldnode.GetPtr(i, tempptr);
-        if (rc) { return rc; }
-
-        rc = newnode.SetKey(i - median, tempkey);
-        if (rc) { return rc; }
-        rc = newnode.SetPtr(i - median, tempptr);
-        if (rc) { return rc; }
-
-      }
-      rc = oldnode.GetPtr(nslots, tempptr);
-      if (rc) { return rc; }
-      rc = newnode.SetPtr(nslots - median, tempptr);
-      if (rc) { return rc; }
-
-      oldnode.info.numkeys = oldnode.info.numkeys - nslots + median;
-
-      // Insert the new key and ptr to either node
-      if (inspos <= origmed) {
-        rc = InsertNonFull(oldnode, key, value, ptr);
-        if (rc) { return rc; }
-      } else {
-        rc = InsertNonFull(newnode, key, value, ptr);
-        if (rc) { return rc; }
-      }
-
-      rc = AllocateNode(ptr);
-      if (rc) { return rc; }
-
-      rc = newnode.GetKey(0, key);
-      if (rc) { return rc; }
-
-      // Promote the median key and delete from the new node
-      for (i = 1; i < newnode.info.numkeys; i++) {
-        rc = newnode.GetKey(i, tempkey);
-        if (rc) { return rc; }
-        rc = newnode.GetPtr(i, tempptr);
-        if (rc) { return rc; }
-
-        rc = newnode.SetKey(i - 1, tempkey);
-        if (rc) { return rc; }
-        rc = newnode.SetPtr(i - 1, tempptr);
-        if (rc) { return rc; }
-      }
-      rc = newnode.GetPtr(newnode.info.numkeys, tempptr);
-      if (rc) { return rc; }
-      rc = newnode.SetPtr(newnode.info.numkeys - 1, tempptr);
-      if (rc) { return rc; }
-
-      newnode.info.numkeys--;
-
-      // Write the changes to the block
-      rc = newnode.Serialize(buffercache, ptr);
-      if (rc) { return rc; }
-
-      pop = true;
-
-      break;
-    }
-
-    // ----------------------------------
-    // BTREE_LEAF_NODE
-    // ----------------------------------
-    //
-    case BTREE_LEAF_NODE: {
-      BTreeNode newnode(BTREE_LEAF_NODE,
-                        superblock.info.keysize,
-                        superblock.info.valuesize,
-                        buffercache -> GetBlockSize());
-      newnode.info.rootnode = superblock_index + 1;
-      newnode.info.numkeys = 0;
-
-      for (i = median; i < nslots; i++) {
-        newnode.info.numkeys++;
-
-        rc = oldnode.GetKey(i, tempkey);
-        if (rc) {return rc;}
-        rc = oldnode.GetVal(i, tempval);
-        if (rc) {return rc;}
-
-        rc = newnode.SetKey(i - median, tempkey);
-        if (rc) {return rc;}
-        rc = newnode.SetVal(i - median, tempval);
-        if (rc) {return rc;}
-      }
-      oldnode.info.numkeys = oldnode.info.numkeys - nslots + median;
-
-      if (inspos <= origmed) {
-        rc = InsertNonFull(oldnode, key, value, ptr);
-        if (rc) {return rc;}
-      } else {
-        rc = InsertNonFull(newnode, key, value, ptr);
-        if (rc) {return rc;}
-      }
-
-      // Allocate block for the node
-      // Update the ptr for next recursion
-      rc = AllocateNode(ptr);
-      if (rc) {return rc;}
-
-      // Update the key for next recursion
-      rc = newnode.GetKey(0, key);
-      if (rc) {return rc;}
-
-      // Fast range query (B+ Tree)
-      // Link the old node to the new node
-      rc = oldnode.GetPtr(0, tempptr);
-      if (rc) {return rc;}
-
-      rc = newnode.SetPtr(0, tempptr);
-      if (rc) {return rc;}
-
-      rc = oldnode.SetPtr(0, ptr);
-      if (rc) {return rc;}
-
-      rc = newnode.Serialize(buffercache, ptr);
-      if (rc) {return rc;}
-
-      pop = true;
-
-      break;
-    }
-
+    pointerPath.push_back(node);
+    return ERROR_NOERROR;
+    break;
     default:
-      return ERROR_INSANE;
+        // We can't be looking at anything other than a root, internal, or leaf
+    return ERROR_INSANE;
+    break;
   }
-  return ERROR_NOERROR;
+
+  return ERROR_INSANE;
+
 }
 
-ERROR_T BTreeIndex::InsertNonFull (BTreeNode &node, KEY_T &key,
-                                   const VALUE_T &value, SIZE_T &ptr)
+//Rebalance takes a path of pointers and a node at the bottom of that path. It will split the node and recursively walk up the parent path
+// guaranteeing the sanity of each parent.
+ERROR_T BTreeIndex::Rebalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath)
 {
+  BTreeNode b;
+  BTreeNode leftNode;
+  BTreeNode rightNode;
   ERROR_T rc;
-
-  KEY_T tempkey;
-  SIZE_T tempptr;
-  VALUE_T tempval;
-  KeyValuePair temppair;
-
   SIZE_T offset;
 
-  for (offset = 0; offset < node.info.numkeys; offset++) {
-    // Move through keys until we find one larger than input key
-    rc = node.GetKey(offset, tempkey);
-    if (rc) { return rc; }
-
-    // Otherwise, break loop
-    if (key < tempkey) { break; }
+  int newType;
+  //SIZE_T ptr;
+  rc = b.Unserialize(buffercache, node);
+  if (rc) { return rc;}
+  //std::cout<<":::: Allocating new Nodes :::::"<<std::endl;
+  //Allocate 2 new nodes, fill them from the place you're splitting
+  SIZE_T leftPtr;
+  SIZE_T rightPtr;
+  AllocateNode(leftPtr);
+  if(b.info.nodetype == BTREE_LEAF_NODE){
+    newType = BTREE_LEAF_NODE;
+  }else{
+    newType = BTREE_INTERIOR_NODE;
   }
+  leftNode = BTreeNode(newType, superblock.info.keysize, superblock.info.valuesize, superblock.info.blocksize);
+  rc = leftNode.Serialize(buffercache, leftPtr);
+  AllocateNode(rightPtr);
+  rightNode = BTreeNode(newType, superblock.info.keysize, superblock.info.valuesize, superblock.info.blocksize);
+  rc = rightNode.Serialize(buffercache, rightPtr);
+  //Unserialize to write to new nodes
+  rc = leftNode.Unserialize(buffercache, leftPtr);
+  if (rc) { return rc;}
+  rc = rightNode.Unserialize(buffercache, rightPtr);
+  if (rc) { return rc;}
 
-  SIZE_T leftptr;
-  SIZE_T rightptr;
+  //Variables to hold spot/key vals
+  KEY_T keySpot;
+  KEY_T testKey;
+  VALUE_T valSpot;
+  SIZE_T ptrSpot;
 
-  int i;
-  node.info.numkeys++;
-  for (i = node.info.numkeys - 2; i >= int(offset); i--) {
-    switch(node.info.nodetype) {
-      case BTREE_ROOT_NODE:
-      case BTREE_INTERIOR_NODE:
+  //Find splitting point
+  int midpoint = (b.info.numkeys+0.5)/2;
 
-        // Shift key
-        rc = node.GetKey(i, tempkey);
-        if (rc) { return rc; }
+  //If A leafNode
+  if(b.info.nodetype==BTREE_LEAF_NODE){
+  //Build left leaf node, include the splitting key (this is a <= B+ tree)
+    for(offset = 0; (int)offset < midpoint; offset++){
+      //std::cout<<":::: OFFSET for building new left leaf node = "<<offset<<std::endl;
+      leftNode.info.numkeys++;
 
-        rc = node.SetKey(i + 1, tempkey);
-        if (rc) { return rc; }
-
-        // Shift pointer
-        rc = node.GetPtr(i + 1, tempptr);
-        if (rc) { return rc; }
-
-        rc = node.SetPtr(i + 2, tempptr);
-        if (rc) { return rc; }
-
-        break;
-
-      case BTREE_LEAF_NODE:
-        rc = node.GetKeyVal(i, temppair);
-        if (rc) { return rc; }
-
-        rc = node.SetKeyVal(i + 1, temppair);
-        break;
-
-      default:
-        return ERROR_INSANE;
+    //Get old node values
+      rc = b.GetKey(offset, keySpot);
+      if (rc) { return rc;}
+      rc = b.GetVal(offset, valSpot);
+      if (rc) { return rc;}
+    //set values in new left node.
+      rc = leftNode.SetKey(offset, keySpot);
+      if (rc) { return rc;}
+      rc = leftNode.SetVal(offset, valSpot);
+      if (rc) { return rc;}
     }
-  }
-
-  // Set input key
-  rc = node.SetKey(offset, key);
-  if (rc) { return rc; }
-
-  // Set input ptr
-  if(node.info.nodetype == BTREE_LEAF_NODE) {
-    rc = node.SetVal(offset, value);
-    if (rc) { return rc; }
-  }
-
-  if(node.info.nodetype == BTREE_ROOT_NODE or
-     node.info.nodetype == BTREE_INTERIOR_NODE) {
-    rc = node.SetPtr(offset + 1, ptr);
-    if (rc) { return rc; }
-  }
-
-  // ----------------------------------
-  // BTREE_ROOT_NODE (SPECIAL CASE)
-  // ----------------------------------
-  // When only 1 key exist in the root node
-  // and the left/right pointers are the same,
-  // rewrite the key and the right pointer.
-  // (Special initial case)
-  if (node.info.nodetype == BTREE_ROOT_NODE) {
-    rc = node.GetPtr(0, leftptr);
-    if (rc) { return rc; }
-    rc = node.GetPtr(1, rightptr);
-    if (rc) { return rc; }
-
-    if (leftptr == rightptr) {
-      rc = node.SetKey(0, key);
-      if (rc) { return rc; }
-      rc = node.SetPtr(1, ptr);
-      if (rc) { return rc; }
-
-      node.info.numkeys = 1;
+  //Build right leaf node
+    int spot=0;
+    for(offset = midpoint; offset<b.info.numkeys; offset++){
+      //std::cout<<":::: OFFSET (spot) for building new right leaf node = "<<spot<<std::endl;
+      //std::cout<<":::: Total Block OFFSET (offset), while rebuilding right leaf node"<<offset<<std::endl;
+    //Get values from old node.
+      rightNode.info.numkeys++;
+      rc = b.GetKey(offset, keySpot);
+      if (rc) { return rc;}
+      rc = b.GetVal(offset, valSpot);
+      if (rc) { return rc;}
+    //set values in new right node.
+      rc = rightNode.SetKey(spot, keySpot);
+      if (rc) { return rc;}
+      rc = rightNode.SetVal(spot, valSpot);
+      if (rc) { return rc;}
+      spot++;
     }
+  } else {//if it's an interior node.
+      //Build left interior node
+  for(offset = 0; (int)offset < midpoint; offset++){
+    //std::cout<<":::: OFFSET for building new left interior node = "<<offset<<std::endl;
+    leftNode.info.numkeys++;
+        //Get old key and pointers
+    rc = b.GetKey(offset, keySpot);
+    if (rc) { return rc;}
+    rc = b.GetPtr(offset, ptrSpot);
+    if (rc) { return rc;}
+        //Set new key and Pointer vals
+    rc = leftNode.SetKey(offset, keySpot);
+    if (rc) { return rc;}
+    rc = leftNode.SetPtr(offset, ptrSpot);
   }
-
-  //number of keys increases;
-  return ERROR_NOERROR;
+      //Build Right interior node
+  int spot=0;
+  for(offset = midpoint; offset<b.info.numkeys; offset++){
+    //std::cout<<":::: OFFSET (spot) for building new right interior node = "<<spot<<std::endl;
+    //std::cout<<":::: Total Block OFFSET (offset), while rebuilding right interior node"<<offset<<std::endl;
+    rightNode.info.numkeys++;
+    //Get values from old node.
+    rc = b.GetKey(offset, keySpot);
+    if (rc) { return rc;}
+    rc = b.GetPtr(offset, ptrSpot);
+    if (rc) { return rc;}
+    //set values in new right node.
+    rc = rightNode.SetKey(spot, keySpot);
+    if (rc) { return rc;}
+    rc = rightNode.SetPtr(spot, ptrSpot);
+    if (rc) { return rc;}
+    spot++;
+  }
+  rc = b.GetPtr(offset, ptrSpot);
+  if (rc) { return rc;}
+  rc = rightNode.SetPtr(spot, ptrSpot);
+  if (rc) { return rc;}
 }
+  //Serialize the new nodes
+rc = leftNode.Serialize(buffercache, leftPtr);
+if (rc) { return rc;}
+rc = rightNode.Serialize(buffercache, rightPtr);
+if (rc) { return rc;}
+rc = b.Serialize(buffercache, node);
 
-ERROR_T BTreeIndex::RangeQuery(const KEY_T &minkey, const KEY_T &maxkey,
-                               list<VALUE_T> &valuelist)
-{
-  ERROR_T rc;
-  BTreeNode leaf;
+  //Find split key
+KEY_T splitKey;
+rc = b.GetKey(midpoint-1, splitKey);
+if (rc) { return rc;}
 
-  KEY_T tempkey;
-  SIZE_T leafptr;
-  VALUE_T tempval;
+  //If we're all the way up at the root, we need to make a new root.
+  //  std::cout << ":::: NODE TYPE = " << b.info.nodetype << std::endl;
 
-  list<SIZE_T> clues;
-  list<KEY_T> keylist;
+  //  std::cout<<"current node nodetype :::: "<<b.info.nodetype<<std::endl;
+if (b.info.nodetype == BTREE_ROOT_NODE) {
+  //std::cout<<":::: AT THE TOP, BUILDING A NEW ROOT ::::"<<std::endl;
+  SIZE_T newRootPtr;
+  BTreeNode newRootNode;
+  AllocateNode(newRootPtr);
+  newRootNode = BTreeNode(BTREE_ROOT_NODE, superblock.info.keysize, superblock.info.valuesize, superblock.info.blocksize);
+  superblock.info.rootnode = newRootPtr;
+    newRootNode.info.rootnode = newRootPtr;
+    newRootNode.info.numkeys = 1;
+    newRootNode.SetKey(0, splitKey);
+    newRootNode.SetPtr(0, leftPtr);
+    newRootNode.SetPtr(1, rightPtr);
+  rc = newRootNode.Serialize(buffercache, newRootPtr);
+  if(rc) {return rc;}
+//std::cout<<"::: We made it here! Root node"<<std::endl;
+}
+else{
+//Find the parent node
+  SIZE_T parentPtr = ptrPath.back();
+//  std::cout<<"WE BUILT THIS CITY ON ROCK AND ROLL COW ::: "<<parentPtr<<std::endl;
+      //std::cout<<"ALSO THIS  IN OUR REBALANCE::: "<<ptrPath.size()<<std::endl;
+//    for(int i =ptrPath.size()-1; i>=0; i--) {
+//        std::cout<<"Little sumpin"<<ptrPath.at(i)<<std::endl;
+//      }
+  ptrPath.pop_back();
+  BTreeNode parentNode;
+  rc = parentNode.Unserialize(buffercache, parentPtr);
+  if(rc) {return rc;}
 
-  rc = LookupInsertion(clues, superblock.info.rootnode, minkey);
-  if (rc) { return rc; }
+    if (parentNode.info.nodetype == BTREE_SUPERBLOCK) {
+        AllocateNode(parentPtr);
 
-  leafptr = clues.front();
+    }
+    //Increment the key count for the given node.
+    //parentNode.info.numkeys++;
 
-  while (keylist.empty() || keylist.back() < maxkey) {
-    rc = leaf.Unserialize(buffercache, leafptr);
-    if (rc) { return rc; }
+    BTreeNode newParentNode = BTreeNode(parentNode.info.nodetype, superblock.info.keysize, superblock.info.valuesize, superblock.info.blocksize);
+    newParentNode.info.numkeys = parentNode.info.numkeys + 1;
+    newParentNode.info.freelist = parentNode.info.freelist;
 
-    for (SIZE_T i = 0; i < leaf.info.numkeys; i++) {
-      rc = leaf.GetKey(i, tempkey);
-      if (rc) { return rc; }
+    bool newKeyInserted = false;
+    for (offset = 0; offset < newParentNode.info.numkeys - 1; offset++) {
+        rc = parentNode.GetKey(offset, testKey);
+        //    if(rc){ return rc;}
+        if (newKeyInserted) {
+            rc = parentNode.GetKey(offset, keySpot);
+            newParentNode.SetKey(offset + 1, keySpot);
 
-      if (minkey < tempkey &&
-          tempkey < maxkey) {
-        rc = leaf.GetVal(i, tempval);
-        if (rc) { return rc; }
+            rc = parentNode.GetPtr(offset + 1, ptrSpot);
+            newParentNode.SetPtr(offset + 2, ptrSpot);
+        } else {
+            if (splitKey < testKey) {
+                newKeyInserted = true;
+                newParentNode.SetPtr(offset, leftPtr);
+                newParentNode.SetKey(offset, splitKey);
+                newParentNode.SetPtr(offset+1, rightPtr);
+                offset = offset - 1;
 
-        keylist.push_back(tempkey);
-        valuelist.push_back(tempval);
-      }
+            } else {
+                rc = parentNode.GetKey(offset, keySpot);
+                if (rc) {return rc;}
+                rc = newParentNode.SetKey(offset, keySpot);
+                if (rc) {return rc;}
+
+                rc = parentNode.GetPtr(offset, ptrSpot);
+                if (rc) {return rc;}
+                rc = newParentNode.SetPtr(offset, ptrSpot);
+                if (rc) {return rc;}
+            }
+        }
+    }
+    if (newKeyInserted == false) {
+        newKeyInserted = true;
+        newParentNode.SetPtr(offset, leftPtr);
+        newParentNode.SetKey(offset, splitKey);
+        newParentNode.SetPtr(offset+1, rightPtr);
     }
 
-  //  if (tempkey.data > minkey.data) {
-  //    break;
-  //  }
+    newParentNode.Serialize(buffercache, parentPtr);
 
-    rc = leaf.GetPtr(0, leafptr);
-    if (rc) { return rc; }
+  if((int)newParentNode.info.numkeys > (int)(2*maxNumKeys/3)){
+    rc = Rebalance(parentPtr, ptrPath);
+    if(rc){ return rc;}
   }
-
-  return ERROR_NOERROR;
+}
+  //Deallocate the old (too large) node
+DeallocateNode(node);
+return ERROR_NOERROR;
 }
 
 ERROR_T BTreeIndex::Update(const KEY_T &key, const VALUE_T &value)
 {
-VALUE_T tempval = value;
-return LookupOrUpdateInternal(superblock.info.rootnode, BTREE_OP_UPDATE, key, tempval);
+  VALUE_T val = value;
+  return LookupOrUpdateInternal(superblock.info.rootnode,BTREE_OP_UPDATE,key,val);
 }
 
 
@@ -1113,14 +883,116 @@ ERROR_T BTreeIndex::Display(ostream &o, BTreeDisplayType display_type) const
 
 ERROR_T BTreeIndex::SanityCheck() const
 {
-  // WRITE ME
-  return ERROR_UNIMPL;
-}
+  //1) Make sure each block is on either the freelist, the super block, or a btree node. And only ONE.		  // WRITE ME
+  //2)Btree has no Cycles (walk tree and guarantee proper structure)		  return ERROR_UNIMPL;
+  //3)Freelist has no cycles (how to check this?)
+  //4)Interior nodes are only pointed to once.
+  //5)leaf nodes are pointed to only once
+  //7)Ordered keys
+  //9)Superblocks key count is same as actual number of keys (how does this account for duplicate keys?)
+  //DEFINE FOR SIZE_T and use pointers instead of nodes for use of comparison operators.
+  //std::set<BTreeNode> allTreeNodes;
+  //Call Sanity Walk on top of tree using superblock.info.rootnode, etc...
+  ERROR_T retCode = SanityWalk(superblock.info.rootnode/*, allTreeNodes*/);
+  //TODO :: Check all of freelist to see if there are any duplicate components
+return retCode;
 
+}
+//We'll use this for walking the tree for our sanity check.
+ERROR_T BTreeIndex::SanityWalk(const SIZE_T &node/*, std::set<BTreeNode> &allTreeNodes*/) const{
+BTreeNode b;
+ERROR_T rc;
+SIZE_T offset;
+KEY_T testkey;
+KEY_T tempkey;
+SIZE_T ptr;
+VALUE_T value;
+rc = b.Unserialize(buffercache, node);
+  //Check if node is already in our BTree
+  // bool is_in = allTreeNodes.find(b) != allTreeNodes.end();
+  // if(is_in) {
+  //   std::cout<<"node "<<b<<" has already been visited by this BTree"<<std::endl;
+  // }
+  // allTreeNodes.insert(b);
+if(rc!=ERROR_NOERROR){
+  return rc;
+}
+      //Check to see if the nodes have proper lengths
+if(b.info.numkeys>(unsigned int)(2*maxNumKeys/3)){
+  std::cout << "Current Node of type "<<b.info.nodetype<<" has "<<b.info.numkeys<<" keys. Which is over the 2/3 threshold of the maximum of "<<maxNumKeys<<" keys."<<std::endl;
+}
+switch(b.info.nodetype){
+  case BTREE_ROOT_NODE:
+  case BTREE_INTERIOR_NODE:
+      //Scan through key/ptr pairs
+      //and recurse if possible
+    //TODO :: Push node onto set, where we can check against other visited nodes.  4, 5.
+  for(offset=0; offset<b.info.numkeys; offset++){
+    rc = b.GetKey(offset,testkey);
+    if(rc) {return rc; }
+      //If keys are not in proper size order
+    if(offset+1<b.info.numkeys-1){
+      rc = b.GetKey(offset+1, tempkey);
+      if(tempkey < testkey){
+        std::cout<<"The keys are not properly sorted!"<<std::endl;
+      }
+    }
+    rc=b.GetPtr(offset,ptr);
+    if(rc){return rc;}
+        return SanityWalk(ptr/*, allTreeNodes*/);
+//      if(key<testkey){
+            // OK, so we now have the first key that's larger
+            // so we ned to recurse on the ptr immediately previous to
+            // this one, if it exists
+        // rc=b.GetPtr(offset,ptr);
+        // if(rc){return rc;}
+        // return SanityWalk(ptr, key);
+   //   }
+  }
+    //If we get here, we need to go to the next pointer, if it exists.
+  if(b.info.numkeys>0){
+    rc = b.GetPtr(b.info.numkeys, ptr);
+    if(rc) { return rc; }
+      return SanityWalk(ptr/*, allTreeNodes*/);
+  }else{
+      //There are no keys at all on this node, so nowhere to go
+    std::cout << "The keys on this interior node are nonexistent."<<std::endl;
+    return ERROR_NONEXISTENT;
+  }
+  break;
+  case BTREE_LEAF_NODE:
+  for(offset=0; offset<b.info.numkeys;offset++){
+    rc = b.GetKey(offset, testkey);
+    if(rc) {
+      std::cout << "Leaf Node is missing key"<<std::endl;
+      return rc;
+    }
+    rc =b.GetVal(offset, value);
+    if(rc){
+      std::cout << "leaf node key is missing associated value"<<std::endl;
+      return rc;
+    }
+      //If keys are not in proper size order
+    if(offset+1<b.info.numkeys){
+      rc = b.GetKey(offset+1, tempkey);
+      if(tempkey < testkey){
+        std::cout<<"The keys are not properly sorted!"<<std::endl;
+      }
+    }
+  }
+  break;
+  default:
+  return ERROR_INSANE;
+  break;
+}
+return ERROR_NOERROR;
+}
 
 
 ostream & BTreeIndex::Print(ostream &os) const
 {
-  // WRITE ME
+  ERROR_T rc;
+  rc = Display(os, BTREE_DEPTH_DOT);
+  // if(rc) { return rc; }
   return os;
 }

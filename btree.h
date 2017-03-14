@@ -3,8 +3,8 @@
 
 #include <iostream>
 #include <string>
-#include <set>
-#include <list>
+#include <vector> //added
+#include <set> //added
 
 #include "global.h"
 #include "block.h"
@@ -48,6 +48,8 @@ class BTreeIndex {
   BufferCache *buffercache;
   SIZE_T       superblock_index;
   BTreeNode    superblock;
+  unsigned int maxNumKeys;
+  bool initBlock;
 
  protected:
 
@@ -107,10 +109,7 @@ public:
   // return ERROR_SIZE if the key or value are the wrong size for this index
   // return ERROR_CONFLICT if the key already exists and it's a unique index
   ERROR_T Insert(const KEY_T &key, const VALUE_T &value);
-  ERROR_T LookupInsertion(list<SIZE_T> &clues, const SIZE_T &node, const KEY_T &key);
-ERROR_T InsertNode(BTreeNode &node, KEY_T &key, const VALUE_T &value, SIZE_T &ptr, bool &pop);
-ERROR_T InsertFull(BTreeNode &node, KEY_T &key, const VALUE_T &value, SIZE_T &ptr, bool &pop);
-ERROR_T InsertNonFull(BTreeNode &node, KEY_T &key, const VALUE_T &value, SIZE_T &ptr);
+
   // return zero on success
   // return ERROR_NONEXISTENT  if the key doesn't exist
   // return ERROR_SIZE if the key or value are the wrong size for this index
@@ -124,8 +123,6 @@ ERROR_T InsertNonFull(BTreeNode &node, KEY_T &key, const VALUE_T &value, SIZE_T 
   // return zero on success
   // return ERROR_NONEXISTENT  if the key doesn't exist
   ERROR_T Lookup(const KEY_T &key, VALUE_T &value);
-  ERROR_T RangeQuery(const KEY_T &minkey, const KEY_T &maxkey, list<VALUE_T> &valuelist);
-
 
   // Here you should figure out if your index makes sense
   // Is it a tree?  Is it in order?  Is it balanced?  Does each node have
@@ -145,6 +142,14 @@ ERROR_T InsertNonFull(BTreeNode &node, KEY_T &key, const VALUE_T &value, SIZE_T 
   ERROR_T Display(ostream &o, BTreeDisplayType display_type=BTREE_DEPTH) const;
 
   ostream & Print(ostream &os) const;
+
+  //This lookup function will find the path to the node where the passed in key would go, and return it as a stack of pointers.
+  ERROR_T CreatePtrTrail(const SIZE_T &node, const KEY_T &key, std::vector<SIZE_T> &pointerPath);
+  //Rebalance takes a path of pointers and a node at the bottom of that path. It will split the node and recursively walk up the parent path
+  // guaranteeing the sanity of each parent.
+  ERROR_T Rebalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath);
+  //Walks the tree starting at root node. For our sanity check.
+  ERROR_T SanityWalk(const SIZE_T &node/*, std::set<BTreeNode> &allTreeNodes*/) const;
 
 };
 
