@@ -49,7 +49,7 @@ class BTreeIndex {
   SIZE_T       superblock_index;
   BTreeNode    superblock;
   unsigned int maxNumKeys;
-  bool initBlock;
+  bool initBlock; // remove?
 
  protected:
 
@@ -145,9 +145,9 @@ public:
 
   //This lookup function will find the path to the node where the passed in key would go, and return it as a stack of pointers.
   ERROR_T CreatePtrTrail(const SIZE_T &node, const KEY_T &key, std::vector<SIZE_T> &pointerPath);
-  //Rebalance takes a path of pointers and a node at the bottom of that path. It will split the node and recursively walk up the parent path
+  //TreeBalance takes a path of pointers and a node at the bottom of that path. It will split the node and recursively walk up the parent path
   // guaranteeing the sanity of each parent.
-  ERROR_T Rebalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath);
+  ERROR_T TreeBalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath);
   //Walks the tree starting at root node. For our sanity check.
   ERROR_T SanityWalk(const SIZE_T &node/*, std::set<BTreeNode> &allTreeNodes*/) const;
 
