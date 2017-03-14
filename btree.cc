@@ -607,7 +607,6 @@ ERROR_T BTreeIndex::TreeBalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath)
   if(b.info.nodetype==BTREE_LEAF_NODE){
   //Build left leaf node, include the splitting key (this is a <= B+ tree)
     for(offset = 0; (int)offset < midpoint; offset++){
-      //std::cout<<":::: OFFSET for building new left leaf node = "<<offset<<std::endl;
       leftNode.info.numkeys++;
 
     //Get old node values
@@ -652,16 +651,16 @@ ERROR_T BTreeIndex::TreeBalance(const SIZE_T &node, std::vector<SIZE_T> ptrPath)
     if (rc) { return rc;}
     rc = leftNode.SetPtr(offset, ptrSpot);
   }
-      //Build Right interior node
-  int spot=0;
-  for(offset = midpoint; offset<b.info.numkeys; offset++){
+    //Build Right interior node
+    int spot=0;
+    for(offset = midpoint; offset<b.info.numkeys; offset++){
     rightNode.info.numkeys++;
     //Get values from old node.
     rc = b.GetKey(offset, keySpot);
     if (rc) { return rc;}
     rc = b.GetPtr(offset, ptrSpot);
     if (rc) { return rc;}
-    //set values in new right node.
+    //Set values in new right node.
     rc = rightNode.SetKey(spot, keySpot);
     if (rc) { return rc;}
     rc = rightNode.SetPtr(spot, ptrSpot);
@@ -713,8 +712,6 @@ else{
 
     }
     //Increment the key count for the given node.
-    //parentNode.info.numkeys++;
-
     BTreeNode newParentNode = BTreeNode(parentNode.info.nodetype, superblock.info.keysize, superblock.info.valuesize, superblock.info.blocksize);
     newParentNode.info.numkeys = parentNode.info.numkeys + 1;
     newParentNode.info.freelist = parentNode.info.freelist;
@@ -890,13 +887,12 @@ ERROR_T BTreeIndex::SanityWalk(const SIZE_T &node) const{
   switch(b.info.nodetype){
     case BTREE_ROOT_NODE:
     case BTREE_INTERIOR_NODE:
-        //Scan through key/ptr pairs
-        //and recurse if possible
+        //Scan through key/ptr pairs and recurse if possible
     for(offset=0; offset<b.info.numkeys; offset++){
       rc = b.GetKey(offset,testkey);
       if(rc) {return rc; }
         //If keys are not in proper size order
-      if(offset+1<b.info.numkeys-1){
+      if(offset<b.info.numkeys-2){
         rc = b.GetKey(offset+1, tempkey);
         if(tempkey < testkey){
           std::cout<<"The keys are not properly sorted!"<<std::endl;
@@ -910,7 +906,7 @@ ERROR_T BTreeIndex::SanityWalk(const SIZE_T &node) const{
     if(b.info.numkeys>0){
       rc = b.GetPtr(b.info.numkeys, ptr);
       if(rc) { return rc; }
-        return SanityWalk(ptr/*, allTreeNodes*/);
+        return SanityWalk(ptr);
     }else{
         //There are no keys at all on this node, so nowhere to go
       std::cout << "The keys on this interior node are nonexistent."<<std::endl;
@@ -930,7 +926,7 @@ ERROR_T BTreeIndex::SanityWalk(const SIZE_T &node) const{
         return rc;
       }
         //If keys are not in proper size order
-      if(offset+1<b.info.numkeys){
+      if(offset<b.info.numkeys-1){
         rc = b.GetKey(offset+1, tempkey);
         if(tempkey < testkey){
           std::cout<<"The keys are not properly sorted!"<<std::endl;
