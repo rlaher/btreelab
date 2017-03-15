@@ -501,7 +501,7 @@ ERROR_T BTreeIndex::Insert(const KEY_T &key, const VALUE_T &value)
   return ERROR_NOERROR;
 }
 
-// Return path to node where key should go
+// Return trail of pointers to the node we will inset into
 ERROR_T BTreeIndex::CreatePtrTrail(const SIZE_T &node, const KEY_T &key, std::vector<SIZE_T> &ptrTrail){
   BTreeNode b;
   ERROR_T rc;
@@ -518,40 +518,40 @@ ERROR_T BTreeIndex::CreatePtrTrail(const SIZE_T &node, const KEY_T &key, std::ve
   switch(b.info.nodetype){
     case BTREE_ROOT_NODE:
     case BTREE_INTERIOR_NODE:
-      // Scan through key/ptr pairs and recurse if possible
+      // Loop through the node to find which pointer we want to move towards
     for(offset=0;offset<b.info.numkeys; offset++){
       rc=b.GetKey(offset,testkey);
       if(rc) { return rc; }
+          //find the first key that is larger than the new key
       if(key < testkey){
-            // OK, so we now have the first key that's larger
-            // so we ned to recurse on the ptr immediately previous to
-            // this one, if it exists
+          // Get pointer immediately to the left, which will point us towards the next node
         rc=b.GetPtr(offset,ptr);
         if (rc) { return rc; }
-          //If there is no error on finding the appropriate pointer, push it onto our stack.
+            //if pointer exists and doesn't have an error, put it on stack and recurse with the updated ptrTrail
         ptrTrail.push_back(ptr);
         return CreatePtrTrail(ptr, key, ptrTrail);
       }
     }
 
-      //if we get here, we need to go to the next pointer, if it exists.
+      //move to the next pointer, to continue the ptrTrail
     if(b.info.numkeys>0){
       rc=b.GetPtr(b.info.numkeys,ptr);
       if (rc) { return rc; }
-        //If there is no error on finding the appropriate pointer, push it onto our stack.
+        //if pointer does not generate an error, put it on stack and recurse with updated ptrTrail
       ptrTrail.push_back(ptr);
       return CreatePtrTrail(ptr, key, ptrTrail);
     } else {
-        // There are no keys at all on this node, so nowhere to go
+        // No keys in this node.  Throw error
       return ERROR_NONEXISTENT;
     }
     break;
     case BTREE_LEAF_NODE:
+        //if at a leaf, put the node on the stack and return
     ptrTrail.push_back(node);
     return ERROR_NOERROR;
     break;
     default:
-        // We can't be looking at anything other than a root, internal, or leaf
+        // if data object is not a rootnode, an internalnode, or a leaf, throw and error
     return ERROR_INSANE;
     break;
   }
@@ -863,84 +863,9 @@ ERROR_T BTreeIndex::Display(ostream &o, BTreeDisplayType display_type) const
 
 ERROR_T BTreeIndex::SanityCheck() const
 {
-  ERROR_T rc = SanityWalk(superblock.info.rootnode);
-  return rc;
+  //unnecessary to implement 
+  return ERROR_UNIMPL;
 }
-//We'll use this for walking the tree for our sanity check.
-ERROR_T BTreeIndex::SanityWalk(const SIZE_T &node) const{
-  BTreeNode b;
-  ERROR_T rc;
-  SIZE_T offset;
-  KEY_T testkey;
-  KEY_T tempkey;
-  SIZE_T ptr;
-  VALUE_T value;
-  rc = b.Unserialize(buffercache, node);
-  if(rc!=ERROR_NOERROR){
-    return rc;
-  }
-
-  //Check to see if the nodes have proper lengths
-  if(b.info.numkeys>(unsigned int)(2*maxNumKeys/3)){
-    std::cout << "Current Node of type "<<b.info.nodetype<<" has "<<b.info.numkeys<<" keys. Which is over the 2/3 threshold of the maximum of "<<maxNumKeys<<" keys."<<std::endl;
-  }
-  switch(b.info.nodetype){
-    case BTREE_ROOT_NODE:
-    case BTREE_INTERIOR_NODE:
-        //Scan through key/ptr pairs and recurse if possible
-    for(offset=0; offset<b.info.numkeys; offset++){
-      rc = b.GetKey(offset,testkey);
-      if(rc) {return rc; }
-        //If keys are not in proper size order
-      if(offset<b.info.numkeys-2){
-        rc = b.GetKey(offset+1, tempkey);
-        if(tempkey < testkey){
-          std::cout<<"The keys are not properly sorted!"<<std::endl;
-        }
-      }
-      rc=b.GetPtr(offset,ptr);
-      if(rc){return rc;}
-          return SanityWalk(ptr);
-    }
-      //If we get here, we need to go to the next pointer, if it exists.
-    if(b.info.numkeys>0){
-      rc = b.GetPtr(b.info.numkeys, ptr);
-      if(rc) { return rc; }
-        return SanityWalk(ptr);
-    }else{
-        //There are no keys at all on this node, so nowhere to go
-      std::cout << "The keys on this interior node are nonexistent."<<std::endl;
-      return ERROR_NONEXISTENT;
-    }
-    break;
-    case BTREE_LEAF_NODE:
-    for(offset=0; offset<b.info.numkeys;offset++){
-      rc = b.GetKey(offset, testkey);
-      if(rc) {
-        std::cout << "Leaf Node is missing key"<<std::endl;
-        return rc;
-      }
-      rc =b.GetVal(offset, value);
-      if(rc){
-        std::cout << "leaf node key is missing associated value"<<std::endl;
-        return rc;
-      }
-        //If keys are not in proper size order
-      if(offset<b.info.numkeys-1){
-        rc = b.GetKey(offset+1, tempkey);
-        if(tempkey < testkey){
-          std::cout<<"The keys are not properly sorted!"<<std::endl;
-        }
-      }
-    }
-    break;
-    default:
-    return ERROR_INSANE;
-    break;
-  }
-  return ERROR_NOERROR;
-}
-
 
 ostream & BTreeIndex::Print(ostream &os) const
 {
